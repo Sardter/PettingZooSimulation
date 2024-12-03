@@ -2,7 +2,7 @@ import random
 from enum import Enum
 
 from pettingzoo import AECEnv
-import numpy as np
+import math
 
 class ItemType(Enum):
     EMPTY = 0
@@ -41,11 +41,11 @@ class GridItem:
 
 class CacheItem:
     pos_x: int
-    post_y: int
+    pos_y: int
     
     def __init__(self, x, y) -> None:
         self.pos_x = x
-        self.post_y = y
+        self.pos_y = y
 
 
 class Agent:
@@ -153,8 +153,22 @@ class SimulationEnviornment(AECEnv):
                     
     
     def __calculate_observation_spaces(self) -> None:
-        for agent in self.__agents_cahce:
-            ...
+        for agent_pos in self.__agents_cahce:
+            x, y = agent_pos.pos_x, agent_pos.pos_y
+            agents = self.__grid[x][y]
+            
+            for every_other_agent_pos in self.__agents_cahce:
+                xj, yj = every_other_agent_pos.pos_x, every_other_agent_pos.pos_y
+                if xj == x and yj == y: continue
+                other_agents = self.__grid[xj][yj]
+                
+                euclidiean_distance = math.sqrt((xj - x) ** 2 + (yj - y) ** 2)
+            
+            for food_pos in self.__food_cahce:
+                xj, yj = food_pos.pos_x, food_pos.pos_y
+                food = self.__grid[xj][yj]
+                
+                euclidiean_distance = math.sqrt((xj - x) ** 2 + (yj - y) ** 2)
                 
                 
 
