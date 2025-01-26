@@ -157,6 +157,12 @@ class SimulationEnviornment(AECEnv):
             x, y = agent_pos.pos_x, agent_pos.pos_y
             agents = self.__grid[x][y]
             
+            for obstacle_pos in self.__obstacle_cache:
+                xj, yj = obstacle_pos.pos_x, obstacle_pos.pos_y
+                obstacle = self.__grid[xj][yj]
+                
+                
+            
             for every_other_agent_pos in self.__agents_cahce:
                 xj, yj = every_other_agent_pos.pos_x, every_other_agent_pos.pos_y
                 if xj == x and yj == y: continue
