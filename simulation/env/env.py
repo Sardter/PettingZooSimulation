@@ -1,42 +1,21 @@
 import random
-from enum import Enum
 
 from pettingzoo import AECEnv
+from gymnasium import spaces
 import math
-
-class ItemType(Enum):
-    EMPTY = 0
-    FOOD = 1
-    OBSTACLE = 2
-    AGENTS = 3
-    
-
-class AgentRole(Enum):
-    VILLAGER = 1
-    THIEF = 2
-    
-class AgentAction(Enum):
-    MOVE = 1
-    GATHER = 2
-    TRADE = 3
-    EAT = 4
-    STEAL = 5
-    EXECUTE = 6
 
 
 class GridItem:
-    id: int
     pos_x: int
-    post_y: int
-    item_type: ItemType
-    item: any
+    pos_y: int
 
-    def __init__(self, id: int, item_type: ItemType, pos_x: int, pos_y: int, item) -> None:
-        self.id = id
-        self.item_type = item_type
+    def __init__(self, pos_x: int, pos_y: int) -> None:
         self.pos_x = pos_x
-        self.post_y = pos_y
-        self.item = item
+        self.pos_y = pos_y
+
+
+class Obstacle(GridItem):
+    ...
 
 
 class CacheItem:
@@ -49,11 +28,50 @@ class CacheItem:
 
 
 class Agent:
+    agent_id: str
     hunger: float # [0, 1]
     inventory: int
     reputation: float # [-1, 1]
-    role: AgentRole
+    
+    def __init__(
+        self,
+        *,
+        agent_id: str = "agent_id",
+        hunger: float = 1,
+        inventory: int = 0,
+        reputation: float = 0
+    ):
+        self.agent_id = agent_id
+        self.hunger = hunger
+        self.inventory = inventory
+        self.reputation = reputation
+    
 
+class Villager(Agent):
+    ...
+
+
+class Thief(Agent):
+    ...
+
+
+class NotObstacle(GridItem):
+    food_count: int
+    villagers: list[Villager]
+    thieves: list[Thief]
+    
+    def __init__(
+        self, 
+        pos_x, 
+        pos_y,
+        food_count: int = 0,
+        villagers: list[Villager] = [],
+        theives: list[Thief] = []
+    ):
+        self.food_count = food_count
+        self.villagers = villagers
+        self.thieves = theives
+        super().__init__(pos_x, pos_y)
 
 
 class SimulationEnviornment(AECEnv):
@@ -63,8 +81,11 @@ class SimulationEnviornment(AECEnv):
     
     __length: int
     __grid: list[list[GridItem]]
-    __obstacle_generation_rate: float
     __food_generation_rate: float
+    __max_agent_sight_distance: int
+    __max_agent_inventory_limit: int
+    __max_agent_gather_limit: int
+    __max_move_limit: int
     
     __grid_food_count: int
     __grid_obstacle_count: int
@@ -75,111 +96,169 @@ class SimulationEnviornment(AECEnv):
     __food_cahce: list[CacheItem]
     __obstacle_cache: list[CacheItem]
 
-    def __init__(self, 
+    def __init__(
+        self,
+        *,
         length: int, 
-        obstacle_generation_rate: float, 
-        food_generation_rate) -> None:
+        food_generation_rate: float,
+        max_agent_sight_distance: int,
+        max_agent_inventory_limit: int,
+        max_agent_gather_limit: int,
+        max_agent_move_limit: int,
+        villager_count: int,
+        thief_count: int,
+        obstacle_count: int,
+    ) -> None:
         
-        assert 0 <= obstacle_generation_rate + food_generation_rate < 1
+        assert 0 <= food_generation_rate < 1
         
         self.__length = length
-        self.__obstacle_generation_rate = obstacle_generation_rate
         self.__food_generation_rate = food_generation_rate
+        self.__max_agent_sight_distance = max_agent_sight_distance
+        self.__max_agent_inventory_limit = max_agent_inventory_limit
+        self.__max_agent_gather_limit = max_agent_gather_limit
+        self.__max_agent_move_limit = max_agent_move_limit
         
-        self.__grid_agents_count = 0
-        self.__grid_obstacle_count = 0
-        self.__grid_food_count = 0
+        self.__grid_agents_count = villager_count + thief_count
+        self.__grid_obstacle_count = obstacle_count
+        self.__grid_food_count = int(round((self.__length ** 2) * self.__food_generation_rate))
         self.__time = 0
         
-        self.__grid = [[self.__init_generate_grid_item(i, j) for j in range(self.__length)] for i in range(self.__length)]
+        self.__possible_villagers = [f"villager_{i}" for i in range(villager_count)]
+        self.__possible_thieves = [f"thief_{i}" for i in range(thief_count)]
         
+        self.possible_agents = self.__possible_villagers + self.__possible_thieves        
+    
     
     def get_food_quantity(self) -> int:
         return self.__grid_food_count
     
+    
     def is_cell_passable(self, x: int, y: int) -> bool:
-        return self.__grid[x][y].item_type != ItemType.OBSTACLE
+        return not isinstance(self.__grid[x][y].item_type, Obstacle)
     
     
-    def __generate_food(self, pos_x: int, pos_y: int):
-        item_type = ItemType.FOOD
-        id = self.__grid_food_count
-        self.__grid_food_count += 1
-        item = 1
-        self.__food_cahce.append(CacheItem(pos_x, pos_y))
-        return GridItem(id=id, item_type=item_type, pos_x=pos_x, pos_y=pos_y, item=item)
-    
+    def reset(self, seed=None, options=None):
+        self.__generate_grid()
+
     
     def __generate_obstacle(self, pos_x: int, pos_y: int):
-        item_type = ItemType.OBSTACLE
-        id = self.__grid_obstacle_count
-        self.__grid_obstacle_count += 1
-        item = None
         self.__obstacle_cache.append(CacheItem(pos_x, pos_y))
-        return GridItem(id=id, item_type=item_type, pos_x=pos_x, pos_y=pos_y, item=item)
+        return Obstacle(pos_x=pos_x, pos_y=pos_y)
     
-    def __generate_empty(self, pos_x: int, pos_y: int):
-        id = -1
-        item_type = ItemType.EMPTY
-        item = None
+    
+    def __generate_not_obstacle(self, pos_x: int, pos_y: int):
+        return NotObstacle(pos_x=pos_x, pos_y=pos_y)
+    
+    
+    def __generate_grid(self):
+        self.__grid = [[self.__generate_not_obstacle(x, y) for y in range(self.__length)] for x in range(self.__length)]
+        availible_positions = [(x, y) for y in range(self.__length) for x in range(self.__length)]
+        self.action_spaces = {}
         
-        return GridItem(id=id, item_type=item_type, pos_x=pos_x, pos_y=pos_y, item=item)
-    
-    
-    def __init_generate_grid_item(self, pos_x: int, pos_y: int) -> GridItem:
-        dice = random.uniform(0, 1)
+        for _ in range(self.__grid_obstacle_count):
+            rand_x, rand_y = random.choice(availible_positions)
+            self.__grid[rand_x][rand_y] = self.__generate_obstacle(rand_x, rand_y)
+            del availible_positions[rand_x * self.__length + rand_y]
         
-        if dice < self.__obstacle_generation_rate:
-            return self.__generate_obstacle(pos_x, pos_y)
-        elif dice < self.__obstacle_generation_rate + self.__food_generation_rate:
-            return self.__generate_food(pos_x, pos_y)
         
-        return self.__generate_empty(pos_x, pos_y)
+        for _ in range(self.__grid_food_count):
+            rand_x, rand_y = random.choice(availible_positions)
+            self.__grid[rand_x][rand_y].food_count += 1
+        
+        
+        for villager_name in self.__possible_villagers:
+            rand_x, rand_y = random.choice(availible_positions)
+            villager = Villager(agent_id=villager_name)
+            action_space = spaces.Dict({
+                "action_type": spaces.Discrete(5),
+                "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+                "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
+                "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+                "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
+                "execute_target": spaces.Discrete(self.__grid_agents_count),
+            })
+            
+            self.__grid[rand_x][rand_y].villagers.append(villager)
+            self.action_spaces[villager_name] = action_space
+        
+        
+        for thief_name in self.__possible_thieves:
+            rand_x, rand_y = random.choice(availible_positions)
+            thief = Thief(agent_id=thief_name)
+            action_space = spaces.Dict({
+                "action_type": spaces.Discrete(5),
+                "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+                "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
+                "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+                "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
+                "steal_target": spaces.Discrete(self.__grid_agents_count),
+            })
+            
+            self.__grid[rand_x][rand_y].thieves.append(thief)
+            self.action_spaces[thief_name] = action_space
+            
     
     
-    def __regenerate_food(self) -> None:
-        for x in range(self.__length):
-            for y in range(self.__length):
-                item_type = self.__grid[x][y].item_type
-                dice = random.uniform(0, 1)
-                
-                if dice >= self.__food_generation_rate:
-                    continue
-                
-                if item_type == ItemType.EMPTY:
-                    self.__grid[x][y] = self.__generate_food(x, y)
-                elif item_type == ItemType.FOOD:
-                    self.__grid[x][y].item += 1
-                    
+    
+    def __bresenham_line(self, x0, y0, x1, y1):
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+
+        current_x, current_y = x0, y0
+
+        while True:
+            yield current_x, current_y
+            if current_x == x1 and current_y == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                current_x += sx
+            if e2 < dx:
+                err += dx
+                current_y += sy
+    
+    
+    def __can_see(self, agents: GridItem, other: GridItem) -> bool:
+        agents_x, agents_y = agents.pos_x, agents.pos_y
+        other_x, other_y = other.pos_x, other.pos_y
+        
+        euclidiean_distance = math.sqrt((agents_x - other_x) ** 2 + (agents_y - other_y) ** 2)
+        if euclidiean_distance > self.__max_agent_sight_distance:
+            return False
+        
+        for x, y in self.__bresenham_line(agents_x, agents_y, other_x, other_y):
+            looking_for_an_obstacle = isinstance(other, Obstacle) and x == other_x and y == other_y
+            if self.is_cell_passable(x, y) and not looking_for_an_obstacle:
+                return False
+        
+        return True
+     
     
     def __calculate_observation_spaces(self) -> None:
+        observations_spaces = dict()
         for agent_pos in self.__agents_cahce:
             x, y = agent_pos.pos_x, agent_pos.pos_y
-            agents = self.__grid[x][y]
+            agents_pos: GridItem = self.__grid[x][y]
+            agents: list[Agent] = agents_pos.item
             
-            for obstacle_pos in self.__obstacle_cache:
-                xj, yj = obstacle_pos.pos_x, obstacle_pos.pos_y
-                obstacle = self.__grid[xj][yj]
+            for agent in agents:
                 
+                for every_other_agent_pos in self.__agents_cahce:
+                    xj, yj = every_other_agent_pos.pos_x, every_other_agent_pos.pos_y
+                    if xj == x and yj == y: continue
+                    other_agents = self.__grid[xj][yj]
+                    
+                    
                 
-            
-            for every_other_agent_pos in self.__agents_cahce:
-                xj, yj = every_other_agent_pos.pos_x, every_other_agent_pos.pos_y
-                if xj == x and yj == y: continue
-                other_agents = self.__grid[xj][yj]
-                
-                euclidiean_distance = math.sqrt((xj - x) ** 2 + (yj - y) ** 2)
-            
-            for food_pos in self.__food_cahce:
-                xj, yj = food_pos.pos_x, food_pos.pos_y
-                food = self.__grid[xj][yj]
-                
-                euclidiean_distance = math.sqrt((xj - x) ** 2 + (yj - y) ** 2)
-                
-                
+                for food_pos in self.__food_cahce:
+                    xj, yj = food_pos.pos_x, food_pos.pos_y
+                    food = self.__grid[xj][yj]
 
-    def reset(self, seed=None, options=None):
-        pass
 
     def step(self, actions):
         pass
