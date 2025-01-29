@@ -1,7 +1,10 @@
 import random
+from typing import Tuple
+from copy import copy
 
 from pettingzoo import AECEnv
 from gymnasium import spaces
+import numpy as np
 import math
 
 
@@ -17,14 +20,6 @@ class GridItem:
 class Obstacle(GridItem):
     ...
 
-
-class CacheItem:
-    pos_x: int
-    pos_y: int
-    
-    def __init__(self, x, y) -> None:
-        self.pos_x = x
-        self.pos_y = y
 
 
 class Agent:
@@ -92,9 +87,9 @@ class SimulationEnviornment(AECEnv):
     __grid_agents_count: int
     __time: int
 
-    __agents_cahce: list[CacheItem]
-    __food_cahce: list[CacheItem]
-    __obstacle_cache: list[CacheItem]
+    __agents_cahce: dict[str, Tuple[int, int]]
+    __food_cahce: dict[int, Tuple[int, int, int]]
+    __obstacle_cache: dict[int, Tuple[int, int]]
 
     def __init__(
         self,
@@ -140,10 +135,11 @@ class SimulationEnviornment(AECEnv):
     
     def reset(self, seed=None, options=None):
         self.__generate_grid()
+        self.agents = copy(self.possible_agents)
 
     
     def __generate_obstacle(self, pos_x: int, pos_y: int):
-        self.__obstacle_cache.append(CacheItem(pos_x, pos_y))
+        self.__obstacle_cache[pos_x * self.__length + pos_y] = (pos_x, pos_y)
         return Obstacle(pos_x=pos_x, pos_y=pos_y)
     
     
@@ -151,10 +147,91 @@ class SimulationEnviornment(AECEnv):
         return NotObstacle(pos_x=pos_x, pos_y=pos_y)
     
     
+    def __generate_villager_action_space(self) -> spaces.Dict:
+        return spaces.Dict({
+            "action_type": spaces.Discrete(6),
+            "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+            "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
+            "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "execute_target": spaces.Discrete(self.__grid_agents_count),
+        })
+    
+    
+    def __generate_thief_action_space(self) -> spaces.Dict:
+        return spaces.Dict({
+            "action_type": spaces.Discrete(6),
+            "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+            "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
+            "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "steal_target": spaces.Discrete(self.__grid_agents_count),
+        })
+    
+    def __generate_agent_observation_space(self, villager_name: str) -> spaces.Dict:
+        return spaces.Dict({
+            "position": spaces.Box(low=0, high=self.__length, shape=(2,), dtype=np.int32),
+            "hunger": spaces.Box(0, 1),
+            "inventory": spaces.Discrete(self.__max_agent_inventory_limit),
+            "visible_agents": spaces.Dict({
+                other_agent: spaces.Dict({
+                    "position": spaces.Box(low=0, high=self.__length, shape=(2,), dtype=np.int32),
+                    "visible": spaces.Discrete(2),
+                })
+                for other_agent in self.possible_agents if other_agent != villager_name
+            }),
+            "agents_reputations": spaces.Dict({
+                other_agent: spaces.Dict({
+                    "repution": spaces.Box(low=-1, high=1),
+                })
+                for other_agent in self.possible_agents if other_agent != villager_name
+            }),
+            "visible_foods": spaces.Dict({
+                food_id: spaces.Dict({
+                    "position": spaces.Box(low=0, high=self.__length, shape=(2,), dtype=np.int32),
+                    "visible": spaces.Discrete(2),
+                    "count": spaces.Discrete(10)
+                })
+                for food_id in self.__food_cahce
+            }),
+            "movable_spaces": spaces.Box(low=0, high=self.__max_agent_move_limit, 
+                    shape=(self.__max_agent_move_limit, self.__max_agent_move_limit), dtype=np.int32)
+        })
+    
+    
+    def __generate_food(self, x: int, y: int):
+        self.__grid[x][y].food_count += 1
+        self.__food_cahce[x * self.__length + y] = (x, y, self.__grid[x][y].food_count)
+    
+    
+    def __generate_villager(self, x: int, y: int, villager_name: str):
+        self.__agents_cahce[villager_name] = (x, y)
+            
+        villager = Villager(agent_id=villager_name)
+        action_space = self.__generate_villager_action_space()
+        observation_space = self.__generate_agent_observation_space(villager_name)
+        
+        self.__grid[x][y].villagers.append(villager)
+        self.action_spaces[villager_name] = action_space
+        self.observation_spaces[villager_name] = observation_space
+    
+    
+    def __generate_thief(self, x: int, y: int, thief_name: str):
+        self.__agents_cahce[thief_name] = (x, y)
+        thief = Thief(agent_id=thief_name)
+        action_space = self.__generate_thief_action_space()
+        observation_space = self.__generate_agent_observation_space(thief_name)
+        
+        self.__grid[x][y].thieves.append(thief)
+        self.action_spaces[thief_name] = action_space
+        self.observation_spaces[thief_name] = observation_space
+    
+    
     def __generate_grid(self):
         self.__grid = [[self.__generate_not_obstacle(x, y) for y in range(self.__length)] for x in range(self.__length)]
         availible_positions = [(x, y) for y in range(self.__length) for x in range(self.__length)]
-        self.action_spaces = {}
+        self.action_spaces = dict()
+        self.observation_spaces = dict()
         
         for _ in range(self.__grid_obstacle_count):
             rand_x, rand_y = random.choice(availible_positions)
@@ -164,42 +241,18 @@ class SimulationEnviornment(AECEnv):
         
         for _ in range(self.__grid_food_count):
             rand_x, rand_y = random.choice(availible_positions)
-            self.__grid[rand_x][rand_y].food_count += 1
+            self.__generate_food(rand_x, rand_y)
         
         
         for villager_name in self.__possible_villagers:
             rand_x, rand_y = random.choice(availible_positions)
-            villager = Villager(agent_id=villager_name)
-            action_space = spaces.Dict({
-                "action_type": spaces.Discrete(5),
-                "move_amount": spaces.Discrete(self.__max_agent_move_limit),
-                "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
-                "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
-                "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
-                "execute_target": spaces.Discrete(self.__grid_agents_count),
-            })
-            
-            self.__grid[rand_x][rand_y].villagers.append(villager)
-            self.action_spaces[villager_name] = action_space
+            self.__generate_villager(rand_x, rand_y, villager_name)
         
         
         for thief_name in self.__possible_thieves:
             rand_x, rand_y = random.choice(availible_positions)
-            thief = Thief(agent_id=thief_name)
-            action_space = spaces.Dict({
-                "action_type": spaces.Discrete(5),
-                "move_amount": spaces.Discrete(self.__max_agent_move_limit),
-                "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
-                "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
-                "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
-                "steal_target": spaces.Discrete(self.__grid_agents_count),
-            })
-            
-            self.__grid[rand_x][rand_y].thieves.append(thief)
-            self.action_spaces[thief_name] = action_space
-            
-    
-    
+            self.__generate_thief(rand_x, rand_y, thief_name)
+
     
     def __bresenham_line(self, x0, y0, x1, y1):
         dx = abs(x1 - x0)
