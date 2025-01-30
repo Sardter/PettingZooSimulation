@@ -21,7 +21,6 @@ class Obstacle(GridItem):
     ...
 
 
-
 class Agent:
     agent_id: str
     hunger: float # [0, 1]
@@ -52,8 +51,8 @@ class Thief(Agent):
 
 class NotObstacle(GridItem):
     food_count: int
-    villagers: list[Villager]
-    thieves: list[Thief]
+    villagers: dict[str, Villager]
+    thieves: dict[str, Thief]
     
     def __init__(
         self, 
@@ -195,7 +194,7 @@ class SimulationEnviornment(AECEnv):
                 for food_id in self.__food_cahce
             }),
             "movable_spaces": spaces.Box(low=0, high=self.__max_agent_move_limit, 
-                    shape=(self.__max_agent_move_limit, self.__max_agent_move_limit), dtype=np.int32)
+                    shape=(self.__max_agent_move_limit * 2 + 1, self.__max_agent_move_limit * 2 + 1), dtype=np.int32)
         })
     
     
@@ -211,7 +210,7 @@ class SimulationEnviornment(AECEnv):
         action_space = self.__generate_villager_action_space()
         observation_space = self.__generate_agent_observation_space(villager_name)
         
-        self.__grid[x][y].villagers.append(villager)
+        self.__grid[x][y].villagers[villager_name] = villager
         self.action_spaces[villager_name] = action_space
         self.observation_spaces[villager_name] = observation_space
     
@@ -222,7 +221,7 @@ class SimulationEnviornment(AECEnv):
         action_space = self.__generate_thief_action_space()
         observation_space = self.__generate_agent_observation_space(thief_name)
         
-        self.__grid[x][y].thieves.append(thief)
+        self.__grid[x][y].thieves[thief_name] = thief
         self.action_spaces[thief_name] = action_space
         self.observation_spaces[thief_name] = observation_space
     
@@ -276,41 +275,76 @@ class SimulationEnviornment(AECEnv):
                 current_y += sy
     
     
-    def __can_see(self, agents: GridItem, other: GridItem) -> bool:
-        agents_x, agents_y = agents.pos_x, agents.pos_y
+    def __can_see(self, agent: GridItem, other: GridItem) -> bool:
+        agent_x, agent_y = agent.pos_x, agent.pos_y
         other_x, other_y = other.pos_x, other.pos_y
         
-        euclidiean_distance = math.sqrt((agents_x - other_x) ** 2 + (agents_y - other_y) ** 2)
+        euclidiean_distance = math.sqrt((agent_x - other_x) ** 2 + (agent_y - other_y) ** 2)
         if euclidiean_distance > self.__max_agent_sight_distance:
             return False
         
-        for x, y in self.__bresenham_line(agents_x, agents_y, other_x, other_y):
+        for x, y in self.__bresenham_line(agent_x, agent_y, other_x, other_y):
             looking_for_an_obstacle = isinstance(other, Obstacle) and x == other_x and y == other_y
             if self.is_cell_passable(x, y) and not looking_for_an_obstacle:
                 return False
         
         return True
-     
+
     
-    def __calculate_observation_spaces(self) -> None:
-        observations_spaces = dict()
-        for agent_pos in self.__agents_cahce:
-            x, y = agent_pos.pos_x, agent_pos.pos_y
-            agents_pos: GridItem = self.__grid[x][y]
-            agents: list[Agent] = agents_pos.item
+    def observe(self, agent_name: str):
+        x, y = self.__agents_cahce[agent_name]
+        agent: Agent = self.__grid[x][y].agents[agent_name]
+        
+        visible_agents = {
+            other_name: {
+                "visible": self.__can_see(self.__grid[x][y], self.__grid[other_x][other_y]), 
+                "position": [other_x, other_y]
+            }
+            for other_name, (other_x, other_y) in self.__agents_cahce.items()
+            if other_name != agent_name
+        }
+        
+        reputations = {
+            other_name: {
+                "reputation": self.__grid[x][y].agents[other_name].reputation,
+            }
+            for other_name in self.__agents_cahce.keys()
+            if other_name != agent_name
+        }
+        
+        visible_foods = {
+            food_key: {
+                "visible": self.__can_see(self.__grid[x][y], self.__grid[food_x][food_y]), 
+                "position": [food_x, food_y],
+                "count": food_count
+            }
+            for food_key, (food_x, food_y, food_count) in self.__food_cahce.items()
+        }
+        
+        movable_spaces = np.full((self.__max_agent_move_limit * 2 + 1, self.__max_agent_move_limit * 2 + 1), -1)
+        
+        for i in range(max(x - self.__max_agent_move_limit, 0), min(x + self.__max_agent_move_limit, self.__length)):
+            for j in range(max(y - self.__max_agent_move_limit, 0), min(y + self.__max_agent_move_limit, self.__length)):
+                movable_spaces[i, j] = round(math.sqrt((i - x) ** 2 + (j - y) ** 2)) if self.is_cell_passable(i, j) else -1
             
-            for agent in agents:
-                
-                for every_other_agent_pos in self.__agents_cahce:
-                    xj, yj = every_other_agent_pos.pos_x, every_other_agent_pos.pos_y
-                    if xj == x and yj == y: continue
-                    other_agents = self.__grid[xj][yj]
-                    
-                    
-                
-                for food_pos in self.__food_cahce:
-                    xj, yj = food_pos.pos_x, food_pos.pos_y
-                    food = self.__grid[xj][yj]
+        return {
+            "position": [x, y],
+            "hunger": agent.hunger,
+            "inventory": agent.inventory,
+            "visible_agents": {other_name: {
+                "position": data["position"] if data['visible'] else [-1, -1], 
+                "visible":data['visible'] } 
+                for other_name, data in visible_agents.items()
+            },
+            "agents_reputations": reputations,
+            "visible_foods": {food_key: {
+                "position": data["position"] if data['visible'] else [-1, -1], 
+                "visible":data['visible'],
+                "count": data["count"] if data['visible'] else -1} 
+                for food_key, data in visible_foods.items()
+            },
+            "movable_spaces": movable_spaces
+        }
 
 
     def step(self, actions):
