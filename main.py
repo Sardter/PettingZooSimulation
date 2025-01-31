@@ -5,19 +5,25 @@ def main():
 
     env.reset(seed=42)
 
-    turns = 10
+    turns = 1
 
-    for _ in range(turns):
-        for agent in env.agent_iter():
-            observation, reward, termination, truncation, info = env.last()
+    for agent in env.agent_iter():
+        #print("agent:", agent)
+        observation, reward, termination, truncation, info = env.last()
+        #print("observation:")
+        #print(observation)
+        #print("reward:")
+        #print(reward)
+        if termination or truncation:
+            action = None
+        else:
+            # this is where you would insert your policy
+            action = env.action_space(agent).sample()
+        print(action)
 
-            if termination or truncation:
-                action = None
-            else:
-                # this is where you would insert your policy
-                action = env.action_space(agent).sample()
-
-            env.step(action)
+        env.step(action)
+        env.render()
+        
 
 
     env.close()
