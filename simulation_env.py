@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from pettingzoo import AECEnv
-from pettingzoo.utils import agent_selector
+from pettingzoo.utils import agent_selector, wrappers
 from gymnasium import spaces
 import pygame
 
@@ -41,7 +41,7 @@ class Agent:
         hunger: float = 1,
         inventory: int = 0,
         reputation: float = 0,
-        alive: bool = True
+        alive: bool = True,
     ):
         self.index = index
         self.agent_id = agent_id
@@ -65,14 +65,9 @@ class AgentActions(Enum):
     GATHER = 2
     TRADE = 3
     EAT = 4
-    
-
-class VillagerActions(AgentActions):
     EXECUTE = 5
-
-
-class ThiefActions(AgentActions):
     STEAL = 6
+    
 
 
 class MovementDirection(Enum):
@@ -127,15 +122,16 @@ class SimulationEnviornment(AECEnv):
     def __init__(
         self,
         *,
-        length: int, 
-        food_generation_rate: float,
-        max_agent_sight_distance: int,
-        max_agent_inventory_limit: int,
-        max_agent_gather_limit: int,
-        max_agent_move_limit: int,
-        villager_count: int,
-        thief_count: int,
-        obstacle_count: int,
+        length: int = 14, 
+        food_generation_rate: float = 0.2,
+        max_agent_sight_distance: int = 4,
+        max_agent_inventory_limit: int = 3,
+        max_agent_gather_limit: int = 2,
+        max_agent_move_limit: int = 3,
+        villager_count: int = 4,
+        thief_count: int = 3,
+        obstacle_count: int = 7,
+        render_mode: str = None,
     ) -> None:
         
         assert 0 <= food_generation_rate < 1
@@ -154,7 +150,8 @@ class SimulationEnviornment(AECEnv):
         self.__possible_villagers = [f"villager_{i}" for i in range(villager_count)]
         self.__possible_thieves = [f"thief_{i}" for i in range(thief_count)]
         
-        self.possible_agents = self.__possible_villagers + self.__possible_thieves        
+        self.possible_agents = self.__possible_villagers + self.__possible_thieves  
+        self.render_mode = render_mode      
     
     
     def get_food_quantity(self) -> int:
@@ -194,7 +191,8 @@ class SimulationEnviornment(AECEnv):
         self.__food_cahce = {}
         self.__obstacle_cache = {}
         self.__generate_grid()
-        self.__time = 0
+        self.turn = 0
+        self.round = 0
         
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.next()
@@ -210,19 +208,19 @@ class SimulationEnviornment(AECEnv):
     
     def __generate_villager_action_space(self) -> spaces.Dict:
         return spaces.Dict({
-            "action_type": spaces.Discrete(len(VillagerActions)),
+            "action_type": spaces.Discrete(len(AgentActions) - 1),
             "move_amount": spaces.Discrete(self.__max_agent_move_limit),
             "move_directions": spaces.Box(
-                low=MovementDirection.SKIP, 
-                high=MovementDirection.Rightward, 
+                low=MovementDirection.SKIP.value, 
+                high=MovementDirection.Rightward.value, 
                 shape=(self.__max_agent_move_limit,),
                 dtype=np.int32
             ),
             "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
+            
             "trade_item": spaces.Box(
-                low=[0, 0], 
-                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
-                shape=(2,),
+                low=np.ndarray([0, 0]), 
+                high=np.ndarray([self.__max_agent_inventory_limit, self.__grid_agents_count]), 
                 dtype=np.int32
             ),
             "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
@@ -232,26 +230,24 @@ class SimulationEnviornment(AECEnv):
     
     def __generate_thief_action_space(self) -> spaces.Dict:
         return spaces.Dict({
-            "action_type": spaces.Discrete(len(ThiefActions)),
+            "action_type": spaces.Discrete(len(AgentActions) - 1),
             "move_amount": spaces.Discrete(self.__max_agent_move_limit),
             "move_directions": spaces.Box(
-                low=MovementDirection.SKIP, 
-                high=MovementDirection.Rightward, 
+                low=MovementDirection.SKIP.value, 
+                high=MovementDirection.Rightward.value, 
                 shape=(self.__max_agent_move_limit,),
                 dtype=np.int32
             ),
             "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
             "trade_item": spaces.Box(
-                low=[0, 0], 
-                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
-                shape=(2,),
+                low=np.ndarray([0, 0]), 
+                high=np.ndarray([self.__max_agent_inventory_limit, self.__grid_agents_count]), 
                 dtype=np.int32
             ),
             "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
             "steal_target": spaces.Box(
-                low=[0, 0], 
-                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
-                shape=(2,),
+                low=np.ndarray([0, 0]), 
+                high=np.ndarray([self.__max_agent_inventory_limit, self.__grid_agents_count]), 
                 dtype=np.int32
             ),
         })
@@ -319,34 +315,36 @@ class SimulationEnviornment(AECEnv):
     
     def __generate_grid(self):
         self.__grid = [[self.__generate_not_obstacle(x, y) for y in range(self.__length)] for x in range(self.__length)]
-        self.__availible_positions = [(x, y) for y in range(self.__length) for x in range(self.__length)]
+        self.__availible_positions = {
+            x * self.__length + y: (x, y) for y in range(self.__length) for x in range(self.__length)
+        }
         self.action_spaces = dict()
         self.observation_spaces = dict()
         
         for _ in range(self.__grid_obstacle_count):
-            rand_x, rand_y = random.choice(self.__availible_positions)
+            rand_x, rand_y = random.choice(list(self.__availible_positions.values()))
             self.__grid[rand_x][rand_y] = self.__generate_obstacle(rand_x, rand_y)
-            del self.__availible_positions[rand_x * self.__length + rand_y]
+            self.__availible_positions.pop(rand_x * self.__length + rand_y)
         
         
         for _ in range(self.__grid_food_count):
-            rand_x, rand_y = random.choice(self.__availible_positions)
+            rand_x, rand_y = random.choice(list(self.__availible_positions.values()))
             self.__generate_food(rand_x, rand_y)
         
         
         for villager_name in self.__possible_villagers:
-            rand_x, rand_y = random.choice(self.__availible_positions)
+            rand_x, rand_y = random.choice(list(self.__availible_positions.values()))
             self.__generate_villager(rand_x, rand_y, villager_name)
         
         
         for thief_name in self.__possible_thieves:
-            rand_x, rand_y = random.choice(self.__availible_positions)
+            rand_x, rand_y = random.choice(list(self.__availible_positions.values()))
             self.__generate_thief(rand_x, rand_y, thief_name)
 
 
     def __regenerate_food(self):
         for _ in range(self.__grid_food_count):
-            rand_x, rand_y = random.choice(self.__availible_positions)
+            rand_x, rand_y = random.choice(list(self.__availible_positions.values()))
             self.__generate_food(rand_x, rand_y)
 
     
@@ -395,7 +393,7 @@ class SimulationEnviornment(AECEnv):
         visible_agents = {
             other_name: {
                 "visible": self.__can_see(self.__grid[x][y], self.__grid[other_x][other_y]), 
-                "position": [other_x, other_y]
+                "position": np.ndarray([other_x, other_y])
             }
             for other_name, (other_x, other_y) in self.__agents_cache.items()
             if other_name != agent_name
@@ -413,7 +411,7 @@ class SimulationEnviornment(AECEnv):
         visible_foods = {
             food_key: {
                 "visible": self.__can_see(self.__grid[x][y], self.__grid[food_x][food_y]), 
-                "position": [food_x, food_y],
+                "position": np.ndarray([food_x, food_y]),
                 "count": food_count
             }
             for food_key, (food_x, food_y, food_count) in self.__food_cahce.items()
@@ -434,7 +432,7 @@ class SimulationEnviornment(AECEnv):
                         movable_spaces[i, j] = round(dist)
             
         return {
-            "position": [x, y],
+            "position": np.ndarray([x, y]),
             "hunger": agent.hunger,
             "inventory": agent.inventory,
             "visible_agents": {other_name: {
@@ -526,11 +524,11 @@ class SimulationEnviornment(AECEnv):
         
         return curr_x, curr_y
     
-    def __villager_actions(self, villager: Villager, action_type: VillagerActions, action: dict):
+    def __villager_actions(self, villager: Villager, action_type: AgentActions, action: dict):
         x, y = self.__agents_cache[villager.agent_id]
         
         match action_type:
-            case VillagerActions.EXECUTE:
+            case AgentActions.EXECUTE:
                 execute_target: int = action["execute_target"]
                 
                 other_agent_name = self.agents[execute_target]
@@ -541,7 +539,7 @@ class SimulationEnviornment(AECEnv):
                     return
                 
                 other_agent.reputation = max(-1, other_agent.reputation - 0.5)
-            case VillagerActions.MOVE:
+            case AgentActions.MOVE:
                 move_amount: int = action['move_amount']
                 move_directions: list[int] = action['move_directions']
                 
@@ -554,14 +552,14 @@ class SimulationEnviornment(AECEnv):
                 
                 self.__agents_cache[villager.agent_id] = (curr_x, curr_y)
             case _:
-                self.__agent_actions(villager, action_typ, action)
+                self.__agent_actions(villager, action_type, action)
     
     
-    def __thief_actions(self, thief: Thief, action_type: ThiefActions, action: dict):
+    def __thief_actions(self, thief: Thief, action_type: AgentActions, action: dict):
         x, y = self.__agents_cache[thief.agent_id]
         
         match action_type:
-            case ThiefActions.STEAL:
+            case AgentActions.STEAL:
                 steal_target: list[int] = action["steal_target"]
                 
                 food_count: int = steal_target[0]
@@ -584,7 +582,7 @@ class SimulationEnviornment(AECEnv):
                 if dice < food_count * 0.2:
                     thief.reputation = max(-1, thief.reputation - food_count * 0.1)
                 
-            case ThiefActions.MOVE:
+            case AgentActions.MOVE:
                 move_amount: int = action['move_amount']
                 move_directions: list[int] = action['move_directions']
                 
@@ -622,19 +620,23 @@ class SimulationEnviornment(AECEnv):
         agent_action = actions[agent_name]
         
         if isinstance(agent, Villager):
-            villager_action = VillagerActions(agent_action["action_type"])
+            villager_action = AgentActions(agent_action["action_type"])
             self.__villager_actions(agent, villager_action, actions)
         else:
-            thief_action = ThiefActions(agent_action["action_type"])
+            thief_action = AgentActions(agent_action["action_type"])
             self.__thief_actions(agent, thief_action, actions)
         
         self.observations[agent_name] = self.observe(agent_name)
         self.state[agent_name] = self.observations[agent_name]
+        self.round += 1
         
         if self._agent_selector.is_last():
             self.__regenerate_food()
             
             self.rewards = dict()
+            
+            self.turn += 1
+            self.round = 0
             
             for agent_name in self.__agents_cache:
                 agent = self.__get_agent(agent_name)
@@ -643,9 +645,9 @@ class SimulationEnviornment(AECEnv):
         
         self.agent_selection = self._agent_selector.next()
         self._accumulate_rewards()
-        
-
-    def render(self, fps: int = 15) -> None:
+    
+    
+    def __pygame_render(self, fps: int = 15) -> None:
         """
         Render a simple 2D view of the grid using pygame.
 
@@ -730,8 +732,30 @@ class SimulationEnviornment(AECEnv):
         # Limit the frame rate
         self._clock.tick(fps)
 
+    def render(self):
+        self.__pygame_render()
+
     def observation_space(self, agent):
         return self.observation_spaces[agent]
 
     def action_space(self, agent):
         return self.action_spaces[agent]
+
+
+def env(render_mode=None):
+    """
+    The env function often wraps the environment in wrappers by default.
+    You can find full documentation for these methods
+    elsewhere in the developer documentation.
+    """
+    internal_render_mode = render_mode if render_mode != "ansi" else "human"
+    env = SimulationEnviornment(render_mode=internal_render_mode)
+    # This wrapper is only for environments which print results to the terminal
+    if render_mode == "ansi":
+        env = wrappers.CaptureStdoutWrapper(env)
+    # this wrapper helps error handling for discrete action spaces
+    env = wrappers.AssertOutOfBoundsWrapper(env)
+    # Provides a wide vareity of helpful user errors
+    # Strongly recommended
+    env = wrappers.OrderEnforcingWrapper(env)
+    return env
