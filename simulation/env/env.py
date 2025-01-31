@@ -9,6 +9,7 @@ import numpy as np
 from pettingzoo import AECEnv
 from pettingzoo.utils import agent_selector
 from gymnasium import spaces
+import pygame
 
 
 class GridItem:
@@ -644,8 +645,90 @@ class SimulationEnviornment(AECEnv):
         self._accumulate_rewards()
         
 
-    def render(self):
-        pass
+    def render(self, fps: int = 15) -> None:
+        """
+        Render a simple 2D view of the grid using pygame.
+
+        :param fps: Frames per second limit for rendering.
+        """
+        # Lazy-import pygame or init it the first time `render` is called
+        if not hasattr(self, '_render_initialized') or not self._render_initialized:
+            pygame.init()
+            
+            # You can tweak these values:
+            self._cell_size = 40
+            self._window_width = self.__length * self._cell_size
+            self._window_height = self.__length * self._cell_size
+            
+            # Create the window
+            self._screen = pygame.display.set_mode((self._window_width, self._window_height))
+            pygame.display.set_caption("Simulation Environment")
+            
+            # For controlling the render frame rate
+            self._clock = pygame.time.Clock()
+            
+            self._render_initialized = True
+
+        # Process any pygame events (so the window remains responsive)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                self._render_initialized = False
+                return
+
+        # Fill background with white
+        self._screen.fill((255, 255, 255))
+
+        # Draw each cell in the grid
+        for x in range(self.__length):
+            for y in range(self.__length):
+                cell = self.__grid[x][y]
+
+                # Convert (x, y) in your grid to a pixel-based rect for pygame
+                # Note: We flip the y-axis so that y=0 is at the "bottom" of the window
+                rect = pygame.Rect(
+                    x * self._cell_size,
+                    (self.__length - 1 - y) * self._cell_size,
+                    self._cell_size,
+                    self._cell_size
+                )
+
+                # Draw obstacles in black
+                if isinstance(cell, Obstacle):
+                    pygame.draw.rect(self._screen, (0, 0, 0), rect)
+                    continue
+
+                # Otherwise, start with a light gray background
+                pygame.draw.rect(self._screen, (220, 220, 220), rect)
+
+                # Check what’s in the cell:
+                num_villagers = len(cell.villagers)
+                num_thieves = len(cell.thieves)
+                food_count = cell.food_count
+
+                # If we have both villagers and thieves => color it purple
+                if num_villagers > 0 and num_thieves > 0:
+                    pygame.draw.rect(self._screen, (128, 0, 128), rect)
+                # If only villagers => color green
+                elif num_villagers > 0:
+                    pygame.draw.rect(self._screen, (0, 200, 0), rect)
+                # If only thieves => color red
+                elif num_thieves > 0:
+                    pygame.draw.rect(self._screen, (200, 0, 0), rect)
+
+                # If there's food, draw a small brown circle in the lower-left corner
+                # (Just a visual cue; you can also draw text for the exact count.)
+                if food_count > 0:
+                    radius = 6
+                    center_x = x * self._cell_size + radius + 4
+                    center_y = (self.__length - 1 - y) * self._cell_size + self._cell_size - radius - 4
+                    pygame.draw.circle(self._screen, (139, 69, 19), (center_x, center_y), radius)
+
+        # Finally, update the display to show the new frame
+        pygame.display.flip()
+
+        # Limit the frame rate
+        self._clock.tick(fps)
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
