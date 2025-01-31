@@ -1,11 +1,14 @@
-import random
 from typing import Tuple
 from copy import copy
+from enum import Enum
+import random
+import math
+
+import numpy as np
 
 from pettingzoo import AECEnv
 from gymnasium import spaces
-import numpy as np
-import math
+
 
 
 class GridItem:
@@ -26,6 +29,7 @@ class Agent:
     hunger: float # [0, 1]
     inventory: int
     reputation: float # [-1, 1]
+    alive: bool
     
     def __init__(
         self,
@@ -33,12 +37,14 @@ class Agent:
         agent_id: str = "agent_id",
         hunger: float = 1,
         inventory: int = 0,
-        reputation: float = 0
+        reputation: float = 0,
+        alive: bool = True
     ):
         self.agent_id = agent_id
         self.hunger = hunger
         self.inventory = inventory
         self.reputation = reputation
+        self.alive = alive
     
 
 class Villager(Agent):
@@ -47,6 +53,30 @@ class Villager(Agent):
 
 class Thief(Agent):
     ...
+
+
+class AgentActions(Enum):
+    SKIP = 0
+    MOVE = 1
+    GATHER = 2
+    TRADE = 3
+    EAT = 4
+    
+
+class VillagerActions(AgentActions):
+    EXECUTE = 5
+
+
+class ThiefActions(AgentActions):
+    STEAL = 6
+
+
+class MovementDirection(Enum):
+    SKIP = -1
+    Forward = 0
+    Backward = 1
+    Leftward = 2
+    Rightward = 3
 
 
 class NotObstacle(GridItem):
@@ -132,6 +162,22 @@ class SimulationEnviornment(AECEnv):
         return not isinstance(self.__grid[x][y].item_type, Obstacle)
     
     
+    def __get_villager(self, villager_name: str) -> Villager | None:
+        x, y = self.__agents_cahce[villager_name]
+        return self.__grid[x][y].villagers.get(villager_name, None)
+    
+    
+    def __get_thief(self, thief_name: str) -> Thief | None:
+        x, y = self.__agents_cahce[thief_name]
+        return self.__grid[x][y].thieves.get(thief_name, None)
+    
+    
+    def __get_agent(self, agent_name: str) -> Agent | None:
+        agent = self.__get_villager(agent_name)
+        if agent is None:
+            agent = self.__get_thief(agent_name)
+        return agent
+    
     def reset(self, seed=None, options=None):
         self.__generate_grid()
         self.agents = copy(self.possible_agents)
@@ -148,10 +194,21 @@ class SimulationEnviornment(AECEnv):
     
     def __generate_villager_action_space(self) -> spaces.Dict:
         return spaces.Dict({
-            "action_type": spaces.Discrete(6),
+            "action_type": spaces.Discrete(len(VillagerActions)),
             "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+            "move_directions": spaces.Box(
+                low=MovementDirection.SKIP, 
+                high=MovementDirection.Rightward, 
+                shape=(self.__max_agent_move_limit,),
+                dtype=np.int32
+            ),
             "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
-            "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "trade_item": spaces.Box(
+                low=[0, 0], 
+                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
+                shape=(2,),
+                dtype=np.int32
+            ),
             "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
             "execute_target": spaces.Discrete(self.__grid_agents_count),
         })
@@ -159,12 +216,28 @@ class SimulationEnviornment(AECEnv):
     
     def __generate_thief_action_space(self) -> spaces.Dict:
         return spaces.Dict({
-            "action_type": spaces.Discrete(6),
+            "action_type": spaces.Discrete(len(ThiefActions)),
             "move_amount": spaces.Discrete(self.__max_agent_move_limit),
+            "move_directions": spaces.Box(
+                low=MovementDirection.SKIP, 
+                high=MovementDirection.Rightward, 
+                shape=(self.__max_agent_move_limit,),
+                dtype=np.int32
+            ),
             "gather_amount": spaces.Discrete(self.__max_agent_gather_limit),
-            "trade_item": spaces.Discrete(self.__max_agent_inventory_limit),
+            "trade_item": spaces.Box(
+                low=[0, 0], 
+                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
+                shape=(2,),
+                dtype=np.int32
+            ),
             "eat_item": spaces.Discrete(self.__max_agent_inventory_limit),
-            "steal_target": spaces.Discrete(self.__grid_agents_count),
+            "steal_target": spaces.Box(
+                low=[0, 0], 
+                high=[self.__max_agent_inventory_limit, self.__grid_agents_count], 
+                shape=(2,),
+                dtype=np.int32
+            ),
         })
     
     def __generate_agent_observation_space(self, villager_name: str) -> spaces.Dict:
@@ -182,6 +255,7 @@ class SimulationEnviornment(AECEnv):
             "agents_reputations": spaces.Dict({
                 other_agent: spaces.Dict({
                     "repution": spaces.Box(low=-1, high=1),
+                    "alive": spaces.Discrete(2),
                 })
                 for other_agent in self.possible_agents if other_agent != villager_name
             }),
@@ -196,7 +270,7 @@ class SimulationEnviornment(AECEnv):
             "movable_spaces": spaces.Box(low=0, high=self.__max_agent_move_limit, 
                     shape=(self.__max_agent_move_limit * 2 + 1, self.__max_agent_move_limit * 2 + 1), dtype=np.int32)
         })
-    
+        
     
     def __generate_food(self, x: int, y: int):
         self.__grid[x][y].food_count += 1
@@ -307,6 +381,7 @@ class SimulationEnviornment(AECEnv):
         reputations = {
             other_name: {
                 "reputation": self.__grid[x][y].agents[other_name].reputation,
+                "alive": self.__grid[x][y].agents[other_name].alive
             }
             for other_name in self.__agents_cahce.keys()
             if other_name != agent_name
@@ -345,10 +420,162 @@ class SimulationEnviornment(AECEnv):
             },
             "movable_spaces": movable_spaces
         }
+        
+    
+    def __agent_actions(self, agent: Agent, action_type: AgentActions, action: dict):
+        x, y = self.__agents_cahce[agent.agent_id]
+        
+        match action_type:
+            case AgentActions.SKIP:
+                ...
+            case AgentActions.GATHER:
+                gather_amount: int = action["gather_amount"]
+                            
+                food_count = self.__grid[x][y].food_count 
+                
+                real_amount = max(0, food_count - gather_amount)
+                inventory_limit = self.__max_agent_inventory_limit - agent.inventory
+                
+                real_amount = inventory_limit - real_amount
+                
+                agent.inventory += real_amount
+                self.__grid[x][y].food_count -= real_amount
+                
+            case AgentActions.TRADE:
+                trade_item: list[int] = action["trade_item"]
+                
+                food_count: int = trade_item[0]
+                food_count = min(food_count, agent.inventory)
+                
+                other_agent_index: int = trade_item[1]
+                other_agent_name = self.agents[other_agent_index]
+                other_x, other_y = self.__agents_cahce[other_agent_name]
+                
+                other_agent = self.__get_agent(other_agent_name)
+                if other_x != x or other_y != y or not other_agent.alive:
+                    return
+                
+                food_count = max(self.__max_agent_inventory_limit - other_agent.inventory, food_count)
+                
+                other_agent.inventory += food_count
+                agent.inventory -= food_count
+                agent.reputation = min(1, agent.reputation + food_count * 0.1)
+                
+                
+            case AgentActions.EAT:
+                eat_item: int = action["eat_item"]
+                
+                eat_item = min(agent.inventory, eat_item)
+                
+                agent.inventory -= eat_item
+                agent.hunger += min(1, agent.hunger + 0.1 * eat_item)
+    
+    def __get_after_movement_position(self, move_amount: int, move_directions: list[int], init_x: int, init_y: int):
+        curr_x, curr_y = init_x, init_y
+        for i in range(move_amount + 1):
+            direction = MovementDirection(move_directions[i])
+            match direction:
+                case MovementDirection.SKIP:
+                    ...
+                case MovementDirection.Forward:
+                    if self.is_cell_passable(curr_x, curr_y + 1):
+                        curr_y += 1
+                case MovementDirection.Backward:
+                    if self.is_cell_passable(curr_x, curr_y - 1):
+                        curr_y -= 1
+                case MovementDirection.Rightward:
+                    if self.is_cell_passable(curr_x + 1, curr_y):
+                        curr_x += 1
+                case MovementDirection.Leftward:
+                    if self.is_cell_passable(curr_x - 1, curr_y):
+                        curr_x -= 1
+        
+        return curr_x, curr_y
+    
+    def __villager_actions(self, villager: Villager, action_type: VillagerActions, action: dict):
+        x, y = self.__agents_cahce[villager.agent_id]
+        
+        match action_type:
+            case VillagerActions.EXECUTE:
+                execute_target: int = action["execute_target"]
+                
+                other_agent_name = self.agents[execute_target]
+                other_x, other_y = self.__agents_cahce[other_agent_name]
+                
+                other_agent = self.__get_agent(other_agent_name)
+                if other_x != x or other_y != y or not other_agent.alive:
+                    return
+                
+                other_agent.reputation = max(-1, other_agent.reputation - 0.5)
+            case VillagerActions.MOVE:
+                move_amount: int = action['move_amount']
+                move_directions: list[int] = action['move_directions']
+                
+                init_x, init_y = self.__agents_cahce[villager.agent_id]
+                curr_x, curr_y = self.__get_after_movement_position(move_amount, move_directions, init_x, init_y)
+                
+                del self.__grid[init_x][init_y].villagers[villager.agent_id]
+                
+                self.__grid[curr_x][curr_y].villagers[villager.agent_id] = villager
+            case _:
+                self.__agent_actions(villager, action_typ, action)
+    
+    
+    def __theif_actions(self, thief: Thief, action_type: ThiefActions, action: dict):
+        x, y = self.__agents_cahce[thief.agent_id]
+        
+        match action_type:
+            case ThiefActions.STEAL:
+                steal_target: list[int] = action["steal_target"]
+                
+                food_count: int = steal_target[0]
+                other_agent_index: int = steal_target[1]
+                
+                other_agent_name = self.agents[other_agent_index]
+                other_x, other_y = self.__agents_cahce[other_agent_name]
+                
+                other_agent = self.__get_agent(other_agent_name)
+                if other_x != x or other_y != y or not other_agent.alive:
+                    return
+                
+                food_count = min(food_count, self.__max_agent_inventory_limit - thief.inventory)
+                food_count = min(food_count, other_agent.inventory)
+                
+                other_agent.inventory -= food_count
+                thief.inventory += food_count
+                
+                dice = random.uniform(0, 1)
+                if dice < food_count * 0.2:
+                    thief.reputation = max(-1, thief.reputation - food_count * 0.1)
+                
+            case ThiefActions.MOVE:
+                move_amount: int = action['move_amount']
+                move_directions: list[int] = action['move_directions']
+                
+                init_x, init_y = self.__agents_cahce[thief.agent_id]
+                curr_x, curr_y = self.__get_after_movement_position(move_amount, move_directions, init_x, init_y)
+                
+                del self.__grid[init_x][init_y].thieves[thief.agent_id]
+                
+                self.__grid[curr_x][curr_y].thieves[thief.agent_id] = thief
+            case _:
+                self.__agent_actions(thief, action_type, action)
 
 
     def step(self, actions):
-        pass
+        agent_name = self.agent_selection
+        x, y = self.__agents_cahce[agent_name]
+        villager: Villager | None = self.__grid[x][y].villagers.get(agent_name, None)
+        thief: Thief | None = self.__grid[x][y].thieves.get(agent_name, None)
+        agent_action = actions[agent_name]
+        
+        if villager is not None:
+            villager_actions = VillagerActions(agent_action["action_type"])
+            self.__villager_actions(villager, villager_actions)
+        else:
+            thief_actions = ThiefActions(agent_action["action_type"])
+            self.__theif_actions(thief, thief_actions)
+        
 
     def render(self):
         pass
